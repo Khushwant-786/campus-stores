@@ -280,6 +280,7 @@
           "due",
           dueTimes.map((d) => [d, d]),
         ) +
+        '<label class="full"><span>Label on the item you’re handing over</span><input name="label" autocomplete="off" spellcheck="false" placeholder="Type or scan, e.g. AD-12" required /></label>' +
         '</div><button type="submit" class="primary">Save issue slip</button></form>'
       );
     }
@@ -321,12 +322,15 @@
         (holder && !l.back
           ? '<small class="holder">' + esc(holder) + "</small>"
           : "") +
+        (l.note ? '<small class="holder">' + esc(l.note) + "</small>" : "") +
         "</div><div>" +
         (l.back
           ? badge("Returned" + (l.returnedBy ? " by " + l.returnedBy : ""))
-          : late(l)
-            ? '<span class="tag late">Overdue</span>'
-            : badge("Out")) +
+          : l.missing
+            ? '<span class="tag late">Missing</span>'
+            : late(l)
+              ? '<span class="tag late">Overdue</span>'
+              : badge("Out")) +
         "</div></div>";
     }
     return html;
@@ -396,25 +400,40 @@
     const same = s.loans.filter(
       (x) => !x.back && getAsset(x.asset).type === unit.type,
     );
-    let msg = unit.repair
-      ? unit.id + " is booked into repair (" + unit.bin + "), not on loan."
-      : unit.id + " (" + unit.model + ") is not on loan. The register has it on the shelf in bin " + unit.bin + ".";
-    let advice = "Nothing has been closed.";
-    if (same.length && !unit.repair) {
-      const x = same[0],
-        xa = getAsset(x.asset);
-      msg +=
-        " The open " + unit.type + " slip is L-" + x.num + " for " + xa.id + " (" + xa.model + ", bin " + xa.bin + "), " + x.req + (x.with ? ", with " + x.with : "") + ".";
-      advice =
-        "Don’t close L-" + x.num + " with this unit. Check bin " + xa.bin + " for the " + xa.model + ": if it’s there, the wrong unit left at pickup and the slips need correcting; if not, " + xa.id + " is still missing. Nothing has been closed.";
-    }
+    if (unit.repair || !same.length)
+      return (
+        html +
+        '<div class="card warn" role="alert"><b>No open slip for this unit.</b><p>' +
+        esc(
+          unit.repair
+            ? unit.id + " is booked into repair (" + unit.bin + "), not on loan. Nothing has been closed."
+            : unit.id + " (" + unit.model + ") is not on loan and no " + unit.type + " is out. Nothing has been closed.",
+        ) +
+        "</p></div>"
+      );
+    const x = same[0],
+      xa = getAsset(x.asset);
     return (
       html +
-      '<div class="card warn" role="alert"><b>Wrong unit for this return.</b><p>' +
-      esc(msg) +
-      "</p><p>" +
-      esc(advice) +
-      "</p></div>"
+      '<form data-correct class="card warn" role="alert"><b>Wrong unit: ' +
+      esc(unit.id + " is not the unit on slip L-" + x.num + ".") +
+      "</b><p>" +
+      esc(
+        unit.id + " (" + unit.model + ") should be on the shelf in bin " + unit.bin + ". The open " + unit.type + " slip is L-" + x.num + " for " + xa.id + " (" + xa.model + "), " + x.req + (x.with ? ", with " + x.with : "") + ".",
+      ) +
+      "</p><p><b>" +
+      esc("Check bin " + xa.bin + " now. Is " + xa.id + " (" + xa.model + ") there?") +
+      '</b></p><input type="hidden" name="num" value="' +
+      x.num +
+      '" /><input type="hidden" name="unit" value="' +
+      esc(unit.id) +
+      '" /><div class="form"><label><span>Returned by</span><select name="by" required>' +
+      opts(people.map((p) => [p, p])) +
+      '</select></label></div><div class="buttons"><button type="submit" name="found" value="yes" class="primary">' +
+      esc("Yes, " + xa.id + " is in " + xa.bin + ": correct the slip") +
+      '</button><button type="submit" name="found" value="no">' +
+      esc("No, mark " + xa.id + " missing") +
+      "</button></div></form>"
     );
   }
   function deskbook() {
@@ -486,7 +505,7 @@
       .join("");
     q("[data-page]").innerHTML = screens[s.tab]();
     if (q("[data-filter]")) q("[data-filter]").value = s.filter;
-    const closing = q("[data-close]");
+    const closing = q("[data-close]") || q("[data-correct]");
     if (closing) {
       const l = s.loans.find((x) => x.num === Number(closing.num.value));
       closing.by.value = l.with || l.who;
@@ -576,6 +595,30 @@
       );
       return;
     }
+    if (f.matches("[data-correct]")) {
+      const l = s.loans.find((x) => x.num === Number(form.get("num")));
+      const unit = getAsset(String(form.get("unit")));
+      const by = String(form.get("by"));
+      const found = e.submitter && e.submitter.value;
+      if (!l || l.back || !unit || out(unit.id) || !people.includes(by)) return;
+      const was = getAsset(l.asset);
+      if (found === "yes") {
+        l.asset = unit.id;
+        l.back = true;
+        l.returnedBy = by;
+        delete l.missing;
+        l.note = "Corrected at return: " + unit.id + " left at pickup, not " + was.id + ". " + was.id + " found in bin " + was.bin + ".";
+        s.check = "";
+        s.followup = openFor(l.req).length ? l.req : "";
+        commit("Slip L-" + l.num + " corrected to " + unit.id + " and closed. Both adapters are in bin " + was.bin + ".");
+      } else if (found === "no") {
+        l.missing = true;
+        l.note = "Missing: " + was.id + " not in bin " + was.bin + ". " + unit.id + " came back instead from " + by + ".";
+        s.check = "";
+        commit("L-" + l.num + " stays open and is marked Missing: " + was.id + ". Shelve " + unit.id + " in bin " + unit.bin + ".");
+      }
+      return;
+    }
     if (f.matches("[data-followup]")) {
       const who = String(form.get("with")),
         exp = String(form.get("expected"));
@@ -610,6 +653,17 @@
         "The approved quantity of this equipment type is already on loan.";
       return;
     }
+    const held = findUnit(form.get("label"));
+    if (!held) {
+      q("[data-status]").textContent =
+        "No unit is labelled “" + String(form.get("label")).trim() + "”. Read the label on the item again.";
+      return;
+    }
+    if (held.id !== unit.id) {
+      q("[data-status]").textContent =
+        "Label mismatch: you selected " + unit.id + " (" + unit.model + ", bin " + unit.bin + ") but you’re holding " + held.id + " (" + held.model + ", bin " + held.bin + "). Hand over " + unit.id + " or change the selection.";
+      return;
+    }
     const num = Math.max(...s.loans.map((l) => l.num)) + 1;
     s.loans.push({ num, req, asset, who, due, back: false });
     s.editing = false;
@@ -638,7 +692,9 @@
           Number.isInteger(l.num) &&
           (l.with === undefined || people.includes(l.with)) &&
           (l.expected === undefined || Object.hasOwn(dueAt, l.expected)) &&
-          (l.returnedBy === undefined || people.includes(l.returnedBy)),
+          (l.returnedBy === undefined || people.includes(l.returnedBy)) &&
+          (l.note === undefined || typeof l.note === "string") &&
+          (l.missing === undefined || typeof l.missing === "boolean"),
       )
     )
       return;
