@@ -1,5 +1,5 @@
 (() => {
-  const storageKey = "campus-stores.shift.v1";
+  const storageKey = "campus-stores.shift.v2";
   const root = document.getElementById("campus-stores");
   const q = (selector) => root.querySelector(selector);
   const requests = [
@@ -89,8 +89,19 @@
     ["Loan register", "book-open"],
     ["Desk book", "messages-square"],
   ];
+  // Desk clock and due times in minutes from Friday midnight, so the register can flag overdue slips.
+  const clockAt = [945, 1170, 1980];
+  const dueAt = {
+    "Fri 8 pm": 1200,
+    "Sat 9 am": 1980,
+    "Sat 10 am": 2040,
+    "Sat noon": 2160,
+  };
+  const dueTimes = Object.keys(dueAt);
   const original = () => ({
-    version: 1,
+    version: 2,
+    check: "",
+    followup: "",
     tab: "Requests",
     phase: 0,
     selected: "",
@@ -114,6 +125,14 @@
   const getAsset = (id) => assets.find((x) => x.id === id);
   const getReq = (id) => requests.find((x) => x.id === id);
   const out = (id) => s.loans.find((l) => l.asset === id && !l.back);
+  const late = (l) => !l.back && dueAt[l.due] < clockAt[s.phase];
+  const openFor = (req) => s.loans.filter((l) => l.req === req && !l.back);
+  // Accept the label as staff would type it: "ad12", "AD 12", "ad-12".
+  const findUnit = (label) => {
+    const k = String(label).toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return assets.find((a) => a.id.replace(/[^A-Z0-9]/g, "") === k);
+  };
+  const unitLine = (a) => a.type + " · " + a.model + " · bin " + a.bin;
   const esc = (x) =>
     String(x).replace(
       /[&<>"']/g,
@@ -249,7 +268,7 @@
         select(
           "Unit leaving the desk",
           "asset",
-          available.map((a) => [a.id, a.id + " · " + a.type]),
+          available.map((a) => [a.id, a.id + " · " + unitLine(a)]),
         ) +
         select(
           "Collected by",
@@ -259,11 +278,12 @@
         select(
           "Return by",
           "due",
-          ["Fri 8 pm", "Sat 9 am", "Sat 10 am", "Sat noon"].map((d) => [d, d]),
+          dueTimes.map((d) => [d, d]),
         ) +
         '</div><button type="submit" class="primary">Save issue slip</button></form>'
       );
     }
+    html += checkin();
     html +=
       '<div class="buttons">' +
       ["Outstanding", "All slips"]
@@ -284,15 +304,118 @@
       .slice()
       .reverse();
     if (!shown.length) html += "<p>No outstanding slips.</p>";
-    for (const l of shown)
-      html += row(
-        "L-" + l.num + " · " + l.asset,
-        l.req + " · " + l.who + " · Due " + l.due,
-        l.back
-          ? badge("Returned")
-          : btn("Record return", "return", String(l.num)),
-      );
+    for (const l of shown) {
+      const a = getAsset(l.asset),
+        r = getReq(l.req);
+      const holder = l.with
+        ? "With " + l.with + (l.expected ? ", expected " + l.expected : "")
+        : "";
+      html +=
+        '<div class="row"><div><strong>' +
+        esc("L-" + l.num + " · " + l.asset + " · " + a.type) +
+        "</strong><small>" +
+        esc(a.model + " · bin " + a.bin + " · " + l.req + " " + r.club) +
+        "</small><small>" +
+        esc("Issued to " + l.who + " · Due " + l.due) +
+        "</small>" +
+        (holder && !l.back
+          ? '<small class="holder">' + esc(holder) + "</small>"
+          : "") +
+        "</div><div>" +
+        (l.back
+          ? badge("Returned" + (l.returnedBy ? " by " + l.returnedBy : ""))
+          : late(l)
+            ? '<span class="tag late">Overdue</span>'
+            : badge("Out")) +
+        "</div></div>";
+    }
     return html;
+  }
+  // Returns start from the unit in the staff member's hand, not from a slip.
+  function checkin() {
+    let html =
+      '<form data-checkin class="checkin"><label><span>Check in a returned item</span><small>Read the label on the unit in your hand.</small><input name="label" autocomplete="off" spellcheck="false" placeholder="e.g. AD-12" value="' +
+      esc(s.check) +
+      '" required /></label><button type="submit" class="primary">Find slip</button></form>';
+    if (s.followup) {
+      const left = openFor(s.followup);
+      const r = getReq(s.followup);
+      if (left.length)
+        html +=
+          '<form data-followup class="card"><b>' +
+          esc(r.id + " " + r.club + " is not complete.") +
+          "</b><p>" +
+          esc(
+            "Still out: " +
+              left.map((l) => l.asset + " (" + getAsset(l.asset).type + ")").join(", ") +
+              ". Who has it now, and when will it come back? This goes on the slip for the next shift.",
+          ) +
+          '</p><div class="form"><label><span>Now with</span><select name="with" required><option value="">Select…</option>' +
+          opts(people.map((p) => [p, p])) +
+          '</select></label><label><span>Expected back</span><select name="expected" required><option value="">Select…</option>' +
+          opts(dueTimes.map((d) => [d, d])) +
+          '</select></label></div><button type="submit">Save on slip</button> ' +
+          btn("Skip", "skip") +
+          "</form>";
+    }
+    if (!s.check) return html;
+    const unit = findUnit(s.check);
+    if (!unit)
+      return (
+        html +
+        '<div class="card warn" role="alert"><b>No unit is labelled “' +
+        esc(s.check) +
+        "”.</b><p>Check the label again. Nothing has been closed.</p></div>"
+      );
+    const l = out(unit.id);
+    if (l) {
+      const r = getReq(l.req);
+      return (
+        html +
+        '<form data-close class="card ok"><b>' +
+        esc(unit.id + " matches open slip L-" + l.num + ".") +
+        "</b><ul><li>" +
+        esc(unitLine(unit)) +
+        "</li><li>" +
+        esc(r.id + " · " + r.club + " · " + r.event) +
+        "</li><li>" +
+        esc("Issued to " + l.who + " · Due " + l.due + (late(l) ? " · Overdue" : "")) +
+        "</li>" +
+        (l.with
+          ? "<li>" + esc("Handover: with " + l.with + (l.expected ? ", expected " + l.expected : "")) + "</li>"
+          : "") +
+        '</ul><input type="hidden" name="num" value="' +
+        l.num +
+        '" /><div class="form"><label><span>Returned by</span><select name="by" required>' +
+        opts(people.map((p) => [p, p])) +
+        '</select></label></div><button type="submit" class="primary">' +
+        esc("Close L-" + l.num + " · shelve in " + unit.bin) +
+        "</button></form>"
+      );
+    }
+    const same = s.loans.filter(
+      (x) => !x.back && getAsset(x.asset).type === unit.type,
+    );
+    let msg = unit.repair
+      ? unit.id + " is booked into repair (" + unit.bin + "), not on loan."
+      : unit.id + " (" + unit.model + ") is not on loan. The register has it on the shelf in bin " + unit.bin + ".";
+    let advice = "Nothing has been closed.";
+    if (same.length && !unit.repair) {
+      const x = same[0],
+        xa = getAsset(x.asset);
+      msg +=
+        " The open " + unit.type + " slip is L-" + x.num + " for " + xa.id + " (" + xa.model + ", bin " + xa.bin + "), " + x.req + (x.with ? ", with " + x.with : "") + ".";
+      advice =
+        "Don’t close L-" + x.num + " with this unit. Check bin " + xa.bin + " for the " + xa.model + ": if it’s there, the wrong unit left at pickup and the slips need correcting; if not, " + xa.id + " is still missing. Nothing has been closed.";
+    }
+    return (
+      html +
+      '<div class="card warn" role="alert"><b>Wrong unit for this return.</b><p>' +
+      esc(msg) +
+      "</p><p>" +
+      esc(advice) +
+      "</p></div>"
+    );
   }
   function deskbook() {
     let html = head(
@@ -363,6 +486,11 @@
       .join("");
     q("[data-page]").innerHTML = screens[s.tab]();
     if (q("[data-filter]")) q("[data-filter]").value = s.filter;
+    const closing = q("[data-close]");
+    if (closing) {
+      const l = s.loans.find((x) => x.num === Number(closing.num.value));
+      closing.by.value = l.with || l.who;
+    }
     q("[data-status]").textContent = s.notice;
   }
   function commit(msg) {
@@ -406,13 +534,9 @@
       case "scope":
         s.onlyOpen = v === "0";
         break;
-      case "return": {
-        const l = s.loans.find((l) => l.num === Number(v));
-        if (!l || l.back) return;
-        l.back = true;
-        s.notice = l.asset + " returned to stock. Slip L-" + l.num + " closed.";
+      case "skip":
+        s.followup = "";
         break;
-      }
     }
     commit();
   });
@@ -431,6 +555,37 @@
       if (!text) return;
       s.notes.push({ phase: s.phase, text });
       commit("Handover note saved.");
+      return;
+    }
+    if (f.matches("[data-checkin]")) {
+      s.check = String(form.get("label")).trim();
+      commit();
+      q('[name="label"]')?.focus();
+      return;
+    }
+    if (f.matches("[data-close]")) {
+      const l = s.loans.find((x) => x.num === Number(form.get("num")));
+      const by = String(form.get("by"));
+      if (!l || l.back || !people.includes(by)) return;
+      l.back = true;
+      l.returnedBy = by;
+      s.check = "";
+      s.followup = openFor(l.req).length ? l.req : "";
+      commit(
+        l.asset + " checked in from " + by + ". Slip L-" + l.num + " closed; shelve in " + getAsset(l.asset).bin + ".",
+      );
+      return;
+    }
+    if (f.matches("[data-followup]")) {
+      const who = String(form.get("with")),
+        exp = String(form.get("expected"));
+      if (!people.includes(who) || !dueAt[exp]) return;
+      const left = openFor(s.followup);
+      for (const l of left) Object.assign(l, { with: who, expected: exp });
+      s.followup = "";
+      commit(
+        "Handover saved on " + left.map((l) => "L-" + l.num).join(", ") + ": with " + who + ", expected " + exp + ".",
+      );
       return;
     }
     if (!f.matches("[data-issue]")) return;
@@ -463,7 +618,9 @@
   function restore(d) {
     if (
       !d ||
-      d.version !== 1 ||
+      d.version !== 2 ||
+      typeof d.check !== "string" ||
+      (d.followup && !getReq(d.followup)) ||
       !Object.hasOwn(screens, d.tab) ||
       !shifts[d.phase] ||
       (d.selected && !getReq(d.selected)) ||
@@ -475,7 +632,13 @@
       !d.loans.length ||
       !d.loans.every(
         (l) =>
-          l && getReq(l.req) && getAsset(l.asset) && Number.isInteger(l.num),
+          l &&
+          getReq(l.req) &&
+          getAsset(l.asset) &&
+          Number.isInteger(l.num) &&
+          (l.with === undefined || people.includes(l.with)) &&
+          (l.expected === undefined || Object.hasOwn(dueAt, l.expected)) &&
+          (l.returnedBy === undefined || people.includes(l.returnedBy)),
       )
     )
       return;
